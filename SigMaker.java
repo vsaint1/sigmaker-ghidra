@@ -42,6 +42,9 @@ public class SigMaker extends GhidraScript {
     private static boolean S_OP_DIRECT       = true;
     private static boolean S_OP_MEMORY       = true;
 
+    // Singleton — only one search window open at a time
+    private static JFrame s_searchFrame = null;
+
     private static final class SigByte {
         final byte    value;
         final boolean wildcard;
@@ -57,6 +60,9 @@ public class SigMaker extends GhidraScript {
         SwingUtilities.invokeLater(this::showMainDialog);
     }
 
+    // =========================================================================
+    // MAIN DIALOG
+    // =========================================================================
     private void showMainDialog() {
         JDialog dlg = new JDialog((Frame) null, "Signature Maker v1.0.5", true);
         dlg.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
@@ -159,6 +165,9 @@ public class SigMaker extends GhidraScript {
         dlg.setVisible(true);
     }
 
+    // =========================================================================
+    // OPERAND TYPES SUB-DIALOG
+    // =========================================================================
     private void showOperandTypesDialog(Runnable onClose) {
         JDialog dlg = new JDialog((Frame) null, "Operand types", true);
         dlg.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
@@ -210,53 +219,168 @@ public class SigMaker extends GhidraScript {
         dlg.setVisible(true);
     }
 
+    // =========================================================================
+    // SEARCH DIALOG
+    //
+    // Fixes applied:
+    //   1. JFrame instead of JDialog(null) → own taskbar button, shows in Alt+Tab
+    //   2. setAlwaysOnTop(true)            → never buried under Ghidra windows
+    //   3. Singleton (s_searchFrame)       → re-running script focuses existing
+    //                                        window instead of opening a duplicate
+    //   4. WindowAdapter clears singleton  → no stale reference after close
+    //   5. "📌 Pin" toggle button          → user can disable always-on-top if
+    //                                        they want to work behind the window
+    //   6. "Clear" button                  → reset field + results in one click
+    //   7. Double-click result line        → navigate to address in listing
+    //   8. Status bar                      → shows match count / search state
+    // =========================================================================
     private void showSearchDialog() {
-        JDialog dlg = new JDialog((Frame) null, "Search for signature", false);
-        dlg.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
+        // ── Singleton: if window already exists, just raise it ────────────
+        if (s_searchFrame != null && s_searchFrame.isDisplayable()) {
+            s_searchFrame.setVisible(true);
+            s_searchFrame.toFront();
+            s_searchFrame.requestFocus();
+            return;
+        }
 
-        JPanel root = new JPanel(new BorderLayout(8, 8));
-        root.setBorder(new EmptyBorder(10, 12, 10, 12));
+        JFrame frame = new JFrame("SigMaker — Search for signature");
+        frame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
+        // Always-on-top so it never gets lost behind Ghidra
+        frame.setAlwaysOnTop(true);
+        s_searchFrame = frame;
 
-        JPanel top = new JPanel(new BorderLayout(6, 4));
-        top.add(new JLabel("Signature (auto-detect: IDA / x64Dbg / C Byte Array / C Raw Bytes):"),
-                BorderLayout.NORTH);
+        // Clear singleton ref when the window is actually closed
+        frame.addWindowListener(new WindowAdapter() {
+            @Override public void windowClosed(WindowEvent e) {
+                s_searchFrame = null;
+            }
+        });
+
+        // ── Toolbar row: pin toggle ───────────────────────────────────────
+        JToggleButton btnPin = new JToggleButton("📌 Always on top", true);
+        btnPin.setMargin(new Insets(2, 6, 2, 6));
+        btnPin.setFont(btnPin.getFont().deriveFont(Font.PLAIN, 11f));
+        btnPin.addActionListener(e -> frame.setAlwaysOnTop(btnPin.isSelected()));
+
+        JPanel toolbar = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
+        toolbar.setBorder(new MatteBorder(0, 0, 1, 0,
+                UIManager.getColor("Separator.foreground") != null
+                        ? UIManager.getColor("Separator.foreground") : Color.GRAY));
+        toolbar.add(btnPin);
+
+        // ── Input area ────────────────────────────────────────────────────
+        JLabel lbl = new JLabel("Signature (auto-detect: IDA / x64Dbg / C Byte Array / C Raw Bytes):");
+        lbl.setBorder(new EmptyBorder(0, 0, 3, 0));
+
         JTextField sigField = new JTextField();
         sigField.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        top.add(sigField, BorderLayout.CENTER);
+
+        JButton btnFind  = new JButton("Find");
+        JButton btnClear = new JButton("Clear");
+        JButton btnClose = new JButton("Close");
+        btnFind .setPreferredSize(new Dimension(72, btnFind .getPreferredSize().height));
+        btnClear.setPreferredSize(new Dimension(72, btnClear.getPreferredSize().height));
+        btnClose.setPreferredSize(new Dimension(72, btnClose.getPreferredSize().height));
 
         JPanel btnRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
-        JButton btnFind  = new JButton("Find");
-        JButton btnClose = new JButton("Close");
         btnRow.add(btnFind);
+        btnRow.add(btnClear);
+        btnRow.add(Box.createHorizontalStrut(10));
         btnRow.add(btnClose);
-        top.add(btnRow, BorderLayout.SOUTH);
 
-        JTextArea resultArea = new JTextArea(10, 60);
+        JPanel inputPanel = new JPanel(new BorderLayout(4, 4));
+        inputPanel.setBorder(new EmptyBorder(8, 12, 4, 12));
+        inputPanel.add(lbl,      BorderLayout.NORTH);
+        inputPanel.add(sigField, BorderLayout.CENTER);
+        inputPanel.add(btnRow,   BorderLayout.SOUTH);
+
+        // ── Results area ──────────────────────────────────────────────────
+        JTextArea resultArea = new JTextArea(12, 62);
         resultArea.setEditable(false);
         resultArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+
         JScrollPane scroll = new JScrollPane(resultArea);
-        scroll.setBorder(new TitledBorder("Results"));
+        scroll.setBorder(new CompoundBorder(
+                new EmptyBorder(0, 12, 4, 12),
+                new TitledBorder("Results  (double-click a line to navigate)")));
 
-        root.add(top,    BorderLayout.NORTH);
-        root.add(scroll, BorderLayout.CENTER);
-        dlg.setContentPane(root);
-        dlg.pack();
-        dlg.setLocationRelativeTo(null);
-        dlg.setVisible(true);
+        // ── Status bar ────────────────────────────────────────────────────
+        JLabel statusBar = new JLabel(" Ready.");
+        statusBar.setFont(statusBar.getFont().deriveFont(Font.PLAIN, 11f));
+        statusBar.setBorder(new CompoundBorder(
+                new MatteBorder(1, 0, 0, 0,
+                        UIManager.getColor("Separator.foreground") != null
+                                ? UIManager.getColor("Separator.foreground") : Color.GRAY),
+                new EmptyBorder(3, 10, 3, 10)));
 
+        // ── Root layout ───────────────────────────────────────────────────
+        JPanel root = new JPanel(new BorderLayout());
+        root.add(toolbar,    BorderLayout.NORTH);
+        root.add(inputPanel, BorderLayout.CENTER); // inputPanel stretches
+        // Wrap center+scroll together
+        JPanel center = new JPanel(new BorderLayout());
+        center.add(inputPanel, BorderLayout.NORTH);
+        center.add(scroll,     BorderLayout.CENTER);
+        root.add(center,    BorderLayout.CENTER);
+        root.add(statusBar, BorderLayout.SOUTH);
+
+        frame.setContentPane(root);
+        frame.pack();
+        frame.setMinimumSize(new Dimension(560, 380));
+        frame.setLocationRelativeTo(null);
+        frame.setVisible(true);
+        frame.getRootPane().setDefaultButton(btnFind);
+        sigField.requestFocus();
+
+        // ── Double-click result line → navigate ───────────────────────────
+        resultArea.addMouseListener(new MouseAdapter() {
+            @Override public void mouseClicked(MouseEvent e) {
+                if (e.getClickCount() != 2) return;
+                try {
+                    int line = resultArea.getLineOfOffset(
+                            resultArea.viewToModel2D(e.getPoint()));
+                    int start = resultArea.getLineStartOffset(line);
+                    int end   = resultArea.getLineEndOffset(line);
+                    String text = resultArea.getText().substring(start, end).trim();
+                    // Line format: "  [N]  <hex-address>  (+0x...)"
+                    for (String tok : text.split("\\s+")) {
+                        if (tok.matches("[0-9a-fA-F]{6,16}")) {
+                            Address dest = currentProgram.getAddressFactory()
+                                    .getDefaultAddressSpace().getAddress(tok);
+                            goTo(dest);
+                            break;
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+        });
+
+        // ── Search logic ──────────────────────────────────────────────────
         Runnable doFind = () -> runAsync(() -> {
             String raw = sigField.getText().trim();
             if (raw.isEmpty()) return;
-            SwingUtilities.invokeLater(() -> resultArea.setText("Searching...\n"));
+
+            SwingUtilities.invokeLater(() -> {
+                resultArea.setText("");
+                statusBar.setText(" Searching…");
+                btnFind.setEnabled(false);
+            });
+
             try {
                 String idaFlat = autoDetect(raw);
-                if (idaFlat == null) {
-                    SwingUtilities.invokeLater(() -> resultArea.setText("Could not parse signature format.\n"));
+                if (idaFlat == null || idaFlat.isBlank()) {
+                    SwingUtilities.invokeLater(() -> {
+                        resultArea.setText("Could not parse signature format.\n");
+                        statusBar.setText(" Parse error.");
+                        btnFind.setEnabled(true);
+                    });
                     return;
                 }
+
                 println("[SigMaker] Searching: " + idaFlat);
                 List<Address> hits = findAll(idaFlat);
                 long base = currentProgram.getImageBase().getOffset();
+
                 StringBuilder sb = new StringBuilder();
                 if (hits.isEmpty()) {
                     sb.append("No matches found.\n");
@@ -270,20 +394,59 @@ public class SigMaker extends GhidraScript {
                         println("[SigMaker] Match " + (i + 1) + ": " + a);
                     }
                 }
-                SwingUtilities.invokeLater(() -> resultArea.setText(sb.toString()));
+
+                final String text   = sb.toString();
+                final String status = hits.isEmpty()
+                        ? " No matches found."
+                        : " " + hits.size() + " match(es) — double-click a line to navigate.";
+
+                SwingUtilities.invokeLater(() -> {
+                    resultArea.setText(text);
+                    resultArea.setCaretPosition(0);
+                    statusBar.setText(status);
+                    btnFind.setEnabled(true);
+                });
+
             } catch (CancelledException ex) {
-                SwingUtilities.invokeLater(() -> resultArea.setText("Cancelled.\n"));
+                SwingUtilities.invokeLater(() -> {
+                    resultArea.setText("Cancelled.\n");
+                    statusBar.setText(" Cancelled.");
+                    btnFind.setEnabled(true);
+                });
             } catch (Exception ex) {
-                SwingUtilities.invokeLater(() -> resultArea.setText("Error: " + ex.getMessage() + "\n"));
+                SwingUtilities.invokeLater(() -> {
+                    resultArea.setText("Error: " + ex.getMessage() + "\n");
+                    statusBar.setText(" Error.");
+                    btnFind.setEnabled(true);
+                });
             }
         });
 
         sigField.addActionListener(e -> doFind.run());
         btnFind .addActionListener(e -> doFind.run());
-        btnClose.addActionListener(e -> dlg.dispose());
-        dlg.getRootPane().setDefaultButton(btnFind);
+
+        btnClear.addActionListener(e -> {
+            sigField.setText("");
+            resultArea.setText("");
+            statusBar.setText(" Ready.");
+            sigField.requestFocus();
+        });
+
+        btnClose.addActionListener(e -> {
+            frame.dispose();
+            s_searchFrame = null;
+        });
+
+        // ESC closes the window
+        frame.getRootPane().registerKeyboardAction(
+                e -> { frame.dispose(); s_searchFrame = null; },
+                KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0),
+                JComponent.WHEN_IN_FOCUSED_WINDOW);
     }
 
+    // =========================================================================
+    // EXECUTE ACTION
+    // =========================================================================
     private void executeAction() {
         try {
             if (S_ACTION == 3) {
@@ -328,6 +491,9 @@ public class SigMaker extends GhidraScript {
         return null;
     }
 
+    // =========================================================================
+    // ACTIONS
+    // =========================================================================
     private void doCreateSig(Address start) throws Exception {
         println("[SigMaker] Creating signature at " + start + " ...");
         List<SigByte> sig = buildSig(start);
@@ -384,6 +550,9 @@ public class SigMaker extends GhidraScript {
         SigEntry(List<SigByte> s, Address a) { sig = s; address = a; }
     }
 
+    // =========================================================================
+    // CORE SIG BUILDER
+    // =========================================================================
     private static final int MAX_SIG_BYTES = 1000;
 
     private List<SigByte> buildSig(Address start) throws Exception {
@@ -550,6 +719,9 @@ public class SigMaker extends GhidraScript {
         }
     }
 
+    // =========================================================================
+    // MATCH COUNTING / SEARCH
+    // =========================================================================
     private int countMatches(List<SigByte> sig) throws Exception {
         byte[] pat = new byte[sig.size()];
         byte[] msk = new byte[sig.size()];
@@ -564,6 +736,93 @@ public class SigMaker extends GhidraScript {
         if (f1 == null) return 0;
         Address f2  = mem.findBytes(f1.add(1), hi, pat, msk, true, TaskMonitor.DUMMY);
         return f2 == null ? 1 : 2;
+    }
+
+    private List<Address> findAll(String idaFlat) throws Exception {
+        byte[][] pm = parseSig(idaFlat);
+        if (pm == null) return Collections.emptyList();
+        Memory mem = currentProgram.getMemory();
+        List<Address> out = new ArrayList<>();
+        Address cur = currentProgram.getMinAddress();
+        Address hi  = currentProgram.getMaxAddress();
+        while (cur != null) {
+            cur = mem.findBytes(cur, hi, pm[0], pm[1], true, TaskMonitor.DUMMY);
+            if (cur == null) break;
+            out.add(cur);
+            try { cur = cur.add(1); } catch (Exception e) { break; }
+        }
+        return out;
+    }
+
+    private byte[][] parseSig(String flat) {
+        if (flat == null || flat.isBlank()) return null;
+        String[] parts = flat.trim().split("\\s+");
+        byte[] b = new byte[parts.length];
+        byte[] m = new byte[parts.length];
+        for (int i = 0; i < parts.length; i++) {
+            if (parts[i].equals("?") || parts[i].equals("??")) {
+                b[i] = 0; m[i] = 0;
+            } else {
+                try {
+                    b[i] = (byte) Integer.parseInt(parts[i], 16);
+                    m[i] = (byte) 0xFF;
+                } catch (NumberFormatException e) { return null; }
+            }
+        }
+        return new byte[][]{b, m};
+    }
+
+    // =========================================================================
+    // FORMAT DETECTION + CONVERTERS
+    // =========================================================================
+    private String autoDetect(String raw) {
+        raw = raw.trim();
+        if (raw.contains("\\x"))                        return parseCByteArray(raw);
+        if (raw.startsWith("0x") || raw.contains(",")) return parseCRawBytes(raw);
+        return raw.replaceAll("\\?\\?", "?");
+    }
+
+    private String parseCByteArray(String raw) {
+        String bytesPart = raw, maskPart = null;
+        int sep = raw.indexOf("  ");
+        if (sep < 0) sep = raw.lastIndexOf(' ');
+        if (sep > 0) {
+            String candidate = raw.substring(sep).trim();
+            if (candidate.matches("[x?]+")) {
+                bytesPart = raw.substring(0, sep).trim();
+                maskPart  = candidate;
+            }
+        }
+        List<String> toks = new ArrayList<>();
+        for (String chunk : bytesPart.split("\\\\x")) {
+            if (chunk.isEmpty()) continue;
+            String s = chunk;
+            while (s.length() >= 2) { toks.add(s.substring(0, 2).toUpperCase()); s = s.substring(2); }
+        }
+        if (maskPart != null)
+            for (int i = 0; i < Math.min(maskPart.length(), toks.size()); i++)
+                if (maskPart.charAt(i) == '?') toks.set(i, "?");
+        return String.join(" ", toks);
+    }
+
+    private String parseCRawBytes(String raw) {
+        String bytesPart = raw, bitmask = null;
+        int bi = raw.indexOf("0b");
+        if (bi > 0) {
+            bytesPart = raw.substring(0, bi).replaceAll(",$", "").trim();
+            bitmask   = raw.substring(bi + 2).trim();
+        }
+        List<String> toks = new ArrayList<>();
+        for (String tok : bytesPart.split("[,\\s]+")) {
+            tok = tok.trim();
+            if (tok.isEmpty()) continue;
+            toks.add(tok.startsWith("0x") || tok.startsWith("0X")
+                    ? tok.substring(2).toUpperCase() : tok.toUpperCase());
+        }
+        if (bitmask != null)
+            for (int i = 0; i < Math.min(bitmask.length(), toks.size()); i++)
+                if (bitmask.charAt(i) == '0') toks.set(i, "?");
+        return String.join(" ", toks);
     }
 
     private void outputSig(List<SigByte> sig, String label) {
@@ -641,90 +900,9 @@ public class SigMaker extends GhidraScript {
         return bytes.toString() + " " + bits.toString();
     }
 
-    private List<Address> findAll(String idaFlat) throws Exception {
-        byte[][] pm = parseSig(idaFlat);
-        if (pm == null) return Collections.emptyList();
-        Memory mem = currentProgram.getMemory();
-        List<Address> out = new ArrayList<>();
-        Address cur = currentProgram.getMinAddress();
-        Address hi  = currentProgram.getMaxAddress();
-        while (cur != null) {
-            cur = mem.findBytes(cur, hi, pm[0], pm[1], true, TaskMonitor.DUMMY);
-            if (cur == null) break;
-            out.add(cur);
-            try { cur = cur.add(1); } catch (Exception e) { break; }
-        }
-        return out;
-    }
-
-    private byte[][] parseSig(String flat) {
-        if (flat == null || flat.isBlank()) return null;
-        String[] parts = flat.trim().split("\\s+");
-        byte[] b = new byte[parts.length];
-        byte[] m = new byte[parts.length];
-        for (int i = 0; i < parts.length; i++) {
-            if (parts[i].equals("?") || parts[i].equals("??")) {
-                b[i] = 0; m[i] = 0;
-            } else {
-                try {
-                    b[i] = (byte) Integer.parseInt(parts[i], 16);
-                    m[i] = (byte) 0xFF;
-                } catch (NumberFormatException e) { return null; }
-            }
-        }
-        return new byte[][]{b, m};
-    }
-
-    private String autoDetect(String raw) {
-        raw = raw.trim();
-        if (raw.contains("\\x"))                        return parseCByteArray(raw);
-        if (raw.startsWith("0x") || raw.contains(",")) return parseCRawBytes(raw);
-        return raw.replaceAll("\\?\\?", "?");
-    }
-
-    private String parseCByteArray(String raw) {
-        String bytesPart = raw, maskPart = null;
-        int sep = raw.indexOf("  ");
-        if (sep < 0) sep = raw.lastIndexOf(' ');
-        if (sep > 0) {
-            String candidate = raw.substring(sep).trim();
-            if (candidate.matches("[x?]+")) {
-                bytesPart = raw.substring(0, sep).trim();
-                maskPart  = candidate;
-            }
-        }
-        List<String> toks = new ArrayList<>();
-        for (String chunk : bytesPart.split("\\\\x")) {
-            if (chunk.isEmpty()) continue;
-            String s = chunk;
-            while (s.length() >= 2) { toks.add(s.substring(0, 2).toUpperCase()); s = s.substring(2); }
-        }
-        if (maskPart != null)
-            for (int i = 0; i < Math.min(maskPart.length(), toks.size()); i++)
-                if (maskPart.charAt(i) == '?') toks.set(i, "?");
-        return String.join(" ", toks);
-    }
-
-    private String parseCRawBytes(String raw) {
-        String bytesPart = raw, bitmask = null;
-        int bi = raw.indexOf("0b");
-        if (bi > 0) {
-            bytesPart = raw.substring(0, bi).replaceAll(",$", "").trim();
-            bitmask   = raw.substring(bi + 2).trim();
-        }
-        List<String> toks = new ArrayList<>();
-        for (String tok : bytesPart.split("[,\\s]+")) {
-            tok = tok.trim();
-            if (tok.isEmpty()) continue;
-            toks.add(tok.startsWith("0x") || tok.startsWith("0X")
-                    ? tok.substring(2).toUpperCase() : tok.toUpperCase());
-        }
-        if (bitmask != null)
-            for (int i = 0; i < Math.min(bitmask.length(), toks.size()); i++)
-                if (bitmask.charAt(i) == '0') toks.set(i, "?");
-        return String.join(" ", toks);
-    }
-
+    // =========================================================================
+    // UI HELPERS
+    // =========================================================================
     private static JLabel sectionLabel(String text) {
         JLabel l = new JLabel(text);
         l.setAlignmentX(Component.LEFT_ALIGNMENT);
